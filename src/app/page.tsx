@@ -351,6 +351,9 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-between p-24">
+      <div className="bg-blue-200 text-blue-900 p-4 rounded mb-6 text-center font-bold text-xl">
+        Preview attiva! (branch test/preview)
+      </div>
       <div className="z-10 max-w-5xl w-full items-center justify-between font-mono text-sm">
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-4xl font-bold">IPTV Platform</h1>
