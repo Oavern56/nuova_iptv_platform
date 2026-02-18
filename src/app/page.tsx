@@ -1,529 +1,206 @@
 'use client';
 
-import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import axios from 'axios';
-import Hls from 'hls.js';
+import { useMemo, useState } from 'react';
 
-type Category = 'live' | 'movies' | 'series';
+type DtcSeverity = 'info' | 'warning' | 'critical';
 
-interface Credentials {
-  serverUrl: string;
-  username: string;
-  password: string;
+interface DtcCode {
+  code: string;
+  description: string;
+  status: 'active' | 'stored';
+  severity: DtcSeverity;
 }
 
-interface VideoPlayerProps {
-  streamUrl: string;
-  title: string;
-  onClose: () => void;
+interface EcuProfile {
+  id: string;
+  name: string;
+  firmware: string;
+  protocol: string;
+  writeTime: string;
 }
 
-const VideoPlayer = ({ streamUrl, title, onClose }: VideoPlayerProps) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const hlsRef = useRef<Hls | null>(null);
-  const retryCountRef = useRef(0);
-  const maxRetries = 5;
-  const retryDelay = 2000;
-  const bufferCheckInterval = 500;
+const dtcMockData: DtcCode[] = [
+  { code: 'P0171', description: 'Miscela aria/carburante troppo magra (Bank 1)', status: 'active', severity: 'warning' },
+  { code: 'P0302', description: 'Mancata accensione cilindro 2', status: 'stored', severity: 'critical' },
+  { code: 'C0035', description: 'Sensore velocità ruota anteriore sinistra', status: 'stored', severity: 'info' },
+  { code: 'U0100', description: 'Perdita comunicazione con ECM/PCM', status: 'active', severity: 'critical' },
+];
 
-  const initHls = useCallback(() => {
-    if (!videoRef.current) return;
-    
-    if (hlsRef.current) {
-      hlsRef.current.destroy();
-    }
+const ecuProfiles: EcuProfile[] = [
+  { id: 'eco-safe', name: 'ECO Safe', firmware: 'v1.24.7', protocol: 'CAN 500 kbps', writeTime: '03:40' },
+  { id: 'stock-plus', name: 'Stock+', firmware: 'v1.24.7', protocol: 'UDS / ISO-TP', writeTime: '04:15' },
+  { id: 'track-lab', name: 'Track Lab', firmware: 'v1.26.1', protocol: 'K-Line legacy', writeTime: '06:10' },
+];
 
-    const video = videoRef.current;
-    const isMovie = streamUrl.includes('/movie/');
-    const isSeries = streamUrl.includes('/series/');
-    const isLive = !isMovie && !isSeries;
-
-    console.log('Tipo contenuto:', isMovie ? 'Film' : isSeries ? 'Serie TV' : 'Live');
-    
-    const hls = new Hls({
-      enableWorker: true,
-      lowLatencyMode: isLive,
-      backBufferLength: isLive ? 90 : 30,
-      maxBufferLength: isLive ? 30 : 60,
-      maxMaxBufferLength: isLive ? 600 : 1200,
-      maxBufferSize: isLive ? 60 * 1000 * 1000 : 120 * 1000 * 1000,
-      maxBufferHole: isLive ? 0.5 : 0.3,
-      highBufferWatchdogPeriod: isLive ? 2 : 1,
-      nudgeMaxRetry: 10,
-      nudgeOffset: 0.1,
-      startFragPrefetch: true,
-      testBandwidth: false,
-      progressive: true,
-      manifestLoadingTimeOut: 30000,
-      manifestLoadingMaxRetry: 5,
-      manifestLoadingRetryDelay: 2000,
-      levelLoadingTimeOut: 30000,
-      levelLoadingMaxRetry: 5,
-      levelLoadingRetryDelay: 2000,
-      fragLoadingTimeOut: 30000,
-      fragLoadingMaxRetry: 5,
-      fragLoadingRetryDelay: 2000,
-      startLevel: -1,
-      abrEwmaDefaultEstimate: 0,
-      abrBandWidthFactor: 0,
-      abrBandWidthUpFactor: 0,
-      abrMaxWithRealBitrate: false,
-      maxStarvationDelay: 4,
-      maxLoadingDelay: 4,
-      minAutoBitrate: 0,
-      xhrSetup: function(xhr, url) {
-        xhr.withCredentials = false;
-        if (isMovie || isSeries) {
-          xhr.setRequestHeader('Range', 'bytes=0-');
-          xhr.setRequestHeader('Accept', '*/*');
-        }
-      }
-    });
-
-    hlsRef.current = hls;
-
-    const manifestUrl = streamUrl.replace('.ts', '.m3u8');
-    console.log('URL manifesto:', manifestUrl);
-    
-    hls.loadSource(manifestUrl);
-    hls.attachMedia(video);
-    
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      console.log('Manifesto HLS analizzato con successo');
-      retryCountRef.current = 0;
-      const levels = hls.levels;
-      if (levels && levels.length > 0) {
-        const highestLevel = levels.length - 1;
-        hls.currentLevel = highestLevel;
-        console.log('Impostata qualità massima:', levels[highestLevel]);
-      }
-      video.play().catch(error => {
-        console.error('Errore durante la riproduzione:', error);
-        if (isMovie || isSeries) {
-          console.log('Tentativo di riproduzione diretta con .ts');
-          video.src = streamUrl;
-          video.load();
-          video.play().catch(console.error);
-        }
-      });
-    });
-
-    hls.on(Hls.Events.ERROR, (event, data) => {
-      console.log('Errore HLS:', data.type, data.details);
-      
-      if (data.fatal) {
-        switch (data.type) {
-          case Hls.ErrorTypes.NETWORK_ERROR:
-            if (retryCountRef.current < maxRetries) {
-              retryCountRef.current++;
-              console.log(`Tentativo di recupero ${retryCountRef.current}/${maxRetries}`);
-              setTimeout(() => hls.startLoad(), retryDelay);
-            } else if (isMovie || isSeries) {
-              console.log('Passaggio alla riproduzione diretta .ts');
-              hls.destroy();
-              video.src = streamUrl;
-              video.load();
-              video.play().catch(console.error);
-            } else {
-              hls.destroy();
-              setTimeout(initHls, retryDelay);
-            }
-            break;
-          case Hls.ErrorTypes.MEDIA_ERROR:
-            console.log('Errore media, tentativo di recupero');
-            hls.recoverMediaError();
-            break;
-          default:
-            console.log('Errore fatale, ricarico player');
-            hls.destroy();
-            if (isMovie || isSeries) {
-              video.src = streamUrl;
-              video.load();
-              video.play().catch(console.error);
-            } else {
-              setTimeout(initHls, retryDelay);
-            }
-            break;
-        }
-      }
-    });
-
-    const bufferCheck = setInterval(() => {
-      if (video.buffered.length > 0) {
-        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-        const currentTime = video.currentTime;
-        const bufferAhead = bufferedEnd - currentTime;
-        
-        if (bufferAhead < (isLive ? 5 : 10)) {
-          console.log('Buffer basso, ricarico');
-          hls.startLoad();
-        }
-      }
-    }, bufferCheckInterval);
-
-    return () => clearInterval(bufferCheck);
-  }, [streamUrl]);
-
-  useEffect(() => {
-    if (Hls.isSupported()) {
-      const cleanup = initHls();
-      return () => {
-        cleanup?.();
-        if (hlsRef.current) {
-          hlsRef.current.destroy();
-        }
-      };
-    }
-  }, [initHls]);
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-4 w-full max-w-4xl">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold">{title}</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button>
-        </div>
-        <div className="relative pt-[56.25%]">
-          <video
-            ref={videoRef}
-            className="absolute top-0 left-0 w-full h-full"
-            controls
-            autoPlay
-            playsInline
-            crossOrigin="anonymous"
-            preload="auto"
-          >
-            Il tuo browser non supporta il tag video.
-          </video>
-        </div>
-      </div>
-    </div>
-  );
+const severityStyles: Record<DtcSeverity, string> = {
+  info: 'bg-sky-500/20 text-sky-300 border-sky-500/30',
+  warning: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
+  critical: 'bg-red-500/20 text-red-300 border-red-500/30',
 };
 
+const tabs = ['Diagnosi OBD-II', 'Riprogrammazione ECU', 'Telemetria in tempo reale'] as const;
+
+type TabName = (typeof tabs)[number];
+
 export default function Home() {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [channels, setChannels] = useState<any>({});
-  const [vpnWarning, setVpnWarning] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<Category>('live');
-  const [credentials, setCredentials] = useState<Credentials | null>(null);
-  const [showCredentialsForm, setShowCredentialsForm] = useState(false);
-  const [selectedVideo, setSelectedVideo] = useState<{ url: string; title: string } | null>(null);
-  const [imageErrors, setImageErrors] = useState<Record<string, boolean>>({});
+  const [activeTab, setActiveTab] = useState<TabName>('Diagnosi OBD-II');
+  const [selectedProfile, setSelectedProfile] = useState('stock-plus');
+  const [scanCompleted, setScanCompleted] = useState(false);
 
-  const fetchContent = useCallback(async (creds: Credentials) => {
-    setLoading(true);
-    setError('');
-
-    try {
-      const axiosInstance = axios.create({
-        timeout: 30000,
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
-        }
-      });
-
-      const [categoriesResponse, liveStreamsResponse, moviesResponse, seriesResponse] = await Promise.all([
-        axiosInstance.get(`${creds.serverUrl}/player_api.php`, {
-          params: {
-            username: creds.username,
-            password: creds.password,
-            action: 'get_live_categories'
-          }
-        }),
-        axiosInstance.get(`${creds.serverUrl}/player_api.php`, {
-          params: {
-            username: creds.username,
-            password: creds.password,
-            action: 'get_live_streams'
-          }
-        }),
-        axiosInstance.get(`${creds.serverUrl}/player_api.php`, {
-          params: {
-            username: creds.username,
-            password: creds.password,
-            action: 'get_vod_streams'
-          }
-        }),
-        axiosInstance.get(`${creds.serverUrl}/player_api.php`, {
-          params: {
-            username: creds.username,
-            password: creds.password,
-            action: 'get_series'
-          }
-        })
-      ]);
-
-      const organizedContent = {
-        live: liveStreamsResponse.data.map((stream: any) => ({
-          id: stream.stream_id,
-          name: stream.name,
-          streamUrl: `${creds.serverUrl}/live/${creds.username}/${creds.password}/${stream.stream_id}.ts`,
-          logoUrl: stream.stream_icon,
-          category: 'live'
-        })),
-        movies: moviesResponse.data.map((movie: any) => ({
-          id: movie.stream_id,
-          name: movie.name,
-          streamUrl: `${creds.serverUrl}/movie/${creds.username}/${creds.password}/${movie.stream_id}.ts`,
-          logoUrl: movie.stream_icon,
-          category: 'movies',
-          container_extension: movie.container_extension || 'ts',
-          info: {
-            duration: movie.duration,
-            rating: movie.rating,
-            releaseDate: movie.release_date,
-            plot: movie.plot
-          }
-        })),
-        series: seriesResponse.data.map((series: any) => ({
-          id: series.series_id,
-          name: series.name,
-          streamUrl: `${creds.serverUrl}/series/${creds.username}/${creds.password}/${series.series_id}.ts`,
-          logoUrl: series.cover,
-          category: 'series'
-        }))
-      };
-
-      setChannels(organizedContent);
-      setVpnWarning(false);
-    } catch (err: any) {
-      console.error('Errore completo:', err);
-      if (err.code === 'ECONNABORTED') {
-        setError('Timeout: Il server non ha risposto in tempo. Verifica che la VPN sia attiva e connessa a un server in Spagna.');
-      } else if (err.response) {
-        setError(`Errore del server: ${err.response.status} - ${err.response.statusText}`);
-      } else if (err.request) {
-        setError('Nessuna risposta dal server. Verifica che la VPN sia attiva e connessa a un server in Spagna.');
-      } else {
-        setError(`Errore: ${err.message || 'Errore durante il recupero dei contenuti'}`);
-      }
-      setVpnWarning(true);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    const savedCredentials = localStorage.getItem('iptv_credentials');
-    if (savedCredentials) {
-      const parsedCredentials = JSON.parse(savedCredentials);
-      setCredentials(parsedCredentials);
-      fetchContent(parsedCredentials);
-    } else {
-      setShowCredentialsForm(true);
-    }
-  }, [fetchContent]);
-
-  const handleSubmit = useCallback(async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const formData = new FormData(e.currentTarget);
-    const newCredentials = {
-      serverUrl: formData.get('serverUrl') as string,
-      username: formData.get('username') as string,
-      password: formData.get('password') as string
-    };
-
-    localStorage.setItem('iptv_credentials', JSON.stringify(newCredentials));
-    setCredentials(newCredentials);
-    setShowCredentialsForm(false);
-    await fetchContent(newCredentials);
-  }, [fetchContent]);
-
-  const handleChangeCredentials = useCallback(() => {
-    setShowCredentialsForm(true);
-    setChannels({});
-  }, []);
-
-  const filteredContent = useMemo(() => {
-    if (!channels[selectedCategory]) return [];
-    return channels[selectedCategory].filter((item: any) =>
-      item.name.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [channels, selectedCategory, searchQuery]);
-
-  const handleImageError = useCallback((id: string) => {
-    setImageErrors(prev => ({ ...prev, [id]: true }));
-  }, []);
+  const selectedProfileData = useMemo(
+    () => ecuProfiles.find((profile) => profile.id === selectedProfile),
+    [selectedProfile]
+  );
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-between p-24">
-      <div className="z-10 max-w-5xl w-full items-center justify-between font-mono text-sm">
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-4xl font-bold">IPTV Platform</h1>
-          {!showCredentialsForm && (
-            <button
-              onClick={handleChangeCredentials}
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300"
-            >
-              Cambia Credenziali
-            </button>
-          )}
-        </div>
-        
-        {vpnWarning && (
-          <div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 mb-4" role="alert">
-            <p className="font-bold">Attenzione!</p>
-            <p>Per accedere ai contenuti è necessario avere una VPN attiva e connessa a un server in Spagna.</p>
+    <main className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-12">
+      <div className="mx-auto max-w-6xl space-y-8">
+        <header className="space-y-4">
+          <p className="inline-block rounded-full border border-cyan-400/30 bg-cyan-400/10 px-4 py-1 text-xs uppercase tracking-widest text-cyan-300">
+            Prototype • Officina Digitale
+          </p>
+          <h1 className="text-3xl font-bold md:text-5xl">Nuova OBD Suite</h1>
+          <p className="max-w-3xl text-slate-300">
+            Replica funzionale di una piattaforma professionale per diagnosi OBD-II e gestione mappature ECU.
+            Questa demo è pensata per ambienti di test e formazione: include simulazione scansioni DTC, selezione profili firmware
+            e monitor live dei principali sensori motore.
+          </p>
+        </header>
+
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
+          <div className="grid gap-3 md:grid-cols-3">
+            {tabs.map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`rounded-xl px-4 py-3 text-sm font-medium transition ${
+                  activeTab === tab
+                    ? 'bg-cyan-500 text-slate-950'
+                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                }`}
+              >
+                {tab}
+              </button>
+            ))}
           </div>
-        )}
+        </section>
 
-        {showCredentialsForm && (
-          <form onSubmit={handleSubmit} className="space-y-4 mb-8">
-            <div>
-              <label htmlFor="serverUrl" className="block text-sm font-medium text-gray-700">
-                Server URL
-              </label>
-              <input
-                type="text"
-                id="serverUrl"
-                name="serverUrl"
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                placeholder="http://example.com:8080"
-                required
-                defaultValue={credentials?.serverUrl}
-              />
-            </div>
-            <div>
-              <label htmlFor="username" className="block text-sm font-medium text-gray-700">
-                Username
-              </label>
-              <input
-                type="text"
-                id="username"
-                name="username"
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                required
-                defaultValue={credentials?.username}
-              />
-            </div>
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700">
-                Password
-              </label>
-              <input
-                type="password"
-                id="password"
-                name="password"
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-                required
-                defaultValue={credentials?.password}
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
-            >
-              {loading ? 'Caricamento...' : 'Connetti'}
-            </button>
-          </form>
-        )}
+        {activeTab === 'Diagnosi OBD-II' && (
+          <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+            <article className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+              <div className="mb-6 flex items-center justify-between">
+                <h2 className="text-xl font-semibold">Scansione codici errore</h2>
+                <button
+                  onClick={() => setScanCompleted(true)}
+                  className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+                >
+                  Avvia scansione completa
+                </button>
+              </div>
 
-        {error && (
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4" role="alert">
-            <span className="block sm:inline">{error}</span>
-          </div>
-        )}
-
-        {Object.keys(channels).length > 0 && (
-          <div className="mt-8">
-            <div className="mb-6">
-              <input
-                type="text"
-                placeholder="Cerca contenuti..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full px-4 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            <div className="flex space-x-4 mb-6">
-              <button
-                onClick={() => setSelectedCategory('live')}
-                className={`px-4 py-2 rounded-md ${
-                  selectedCategory === 'live'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                Canali Live
-              </button>
-              <button
-                onClick={() => setSelectedCategory('movies')}
-                className={`px-4 py-2 rounded-md ${
-                  selectedCategory === 'movies'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                Film
-              </button>
-              <button
-                onClick={() => setSelectedCategory('series')}
-                className={`px-4 py-2 rounded-md ${
-                  selectedCategory === 'series'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                Serie TV
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {filteredContent.map((item: any) => (
-                <div key={item.id} className="border rounded-lg p-4 hover:shadow-lg transition-shadow">
-                  <div className="w-16 h-16 mb-2 flex items-center justify-center bg-gray-100 rounded">
-                    {item.logoUrl && !imageErrors[item.id] ? (
-                      <img
-                        src={item.logoUrl}
-                        alt={item.name}
-                        className="w-16 h-16 object-contain"
-                        onError={() => handleImageError(item.id)}
-                      />
-                    ) : (
-                      <div className="text-gray-400 text-xs text-center">
-                        {item.name.charAt(0)}
+              {scanCompleted ? (
+                <ul className="space-y-3">
+                  {dtcMockData.map((dtc) => (
+                    <li
+                      key={dtc.code}
+                      className="rounded-xl border border-slate-700 bg-slate-800/60 p-4"
+                    >
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <p className="font-mono text-lg font-bold">{dtc.code}</p>
+                        <span className={`rounded-full border px-3 py-1 text-xs uppercase ${severityStyles[dtc.severity]}`}>
+                          {dtc.severity}
+                        </span>
                       </div>
-                    )}
-                  </div>
-                  <h4 className="font-medium">{item.name}</h4>
-                  {item.category === 'movies' && item.info && (
-                    <div className="text-sm text-gray-600 mt-1">
-                      {item.info.duration && <div>Durata: {item.info.duration}</div>}
-                      {item.info.rating && <div>Rating: {item.info.rating}</div>}
-                      {item.info.releaseDate && <div>Anno: {item.info.releaseDate}</div>}
-                    </div>
-                  )}
-                  <button
-                    onClick={() => setSelectedVideo({ url: item.streamUrl, title: item.name })}
-                    className="mt-2 text-sm text-blue-600 hover:text-blue-800"
-                  >
-                    Guarda
-                  </button>
+                      <p className="text-sm text-slate-300">{dtc.description}</p>
+                      <p className="mt-2 text-xs text-slate-400">Stato: {dtc.status === 'active' ? 'attivo' : 'memorizzato'}</p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="rounded-xl border border-dashed border-slate-700 bg-slate-800/50 p-8 text-center text-slate-400">
+                  Premi “Avvia scansione completa” per simulare la lettura DTC da centralina.
+                </p>
+              )}
+            </article>
+
+            <article className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900 p-6">
+              <h3 className="text-lg font-semibold">Stato connessione veicolo</h3>
+              <ul className="space-y-3 text-sm text-slate-300">
+                <li className="rounded-lg bg-slate-800 px-4 py-3">Interfaccia: J2534 Pass-Thru</li>
+                <li className="rounded-lg bg-slate-800 px-4 py-3">Tensione batteria: 12.3V</li>
+                <li className="rounded-lg bg-slate-800 px-4 py-3">Protocollo attivo: ISO 15765-4 (CAN)</li>
+                <li className="rounded-lg bg-slate-800 px-4 py-3">VIN rilevato: VF3XXXXXXXXXXXXX</li>
+              </ul>
+            </article>
+          </section>
+        )}
+
+        {activeTab === 'Riprogrammazione ECU' && (
+          <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+            <article className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+              <h2 className="mb-4 text-xl font-semibold">Selezione profilo firmware</h2>
+              <div className="space-y-3">
+                {ecuProfiles.map((profile) => (
+                  <label key={profile.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-800/60 p-4">
+                    <input
+                      type="radio"
+                      name="ecu-profile"
+                      checked={selectedProfile === profile.id}
+                      onChange={() => setSelectedProfile(profile.id)}
+                      className="mt-1"
+                    />
+                    <span>
+                      <span className="block font-semibold">{profile.name}</span>
+                      <span className="block text-sm text-slate-400">Firmware: {profile.firmware}</span>
+                      <span className="block text-sm text-slate-400">Protocollo: {profile.protocol}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </article>
+
+            <article className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+              <h3 className="text-lg font-semibold">Riepilogo scrittura</h3>
+              <div className="mt-4 space-y-3 rounded-xl bg-slate-800/60 p-4 text-sm text-slate-300">
+                <p>Profilo selezionato: <strong>{selectedProfileData?.name}</strong></p>
+                <p>Versione firmware: <strong>{selectedProfileData?.firmware}</strong></p>
+                <p>Tempo stimato scrittura: <strong>{selectedProfileData?.writeTime}</strong></p>
+                <p>Controllo checksum: <strong>abilitato</strong></p>
+                <p>Backup automatico EEPROM: <strong>attivo</strong></p>
+              </div>
+              <button className="mt-6 w-full rounded-lg bg-cyan-500 px-4 py-3 font-semibold text-slate-950 hover:bg-cyan-400">
+                Simula riprogrammazione sicura
+              </button>
+            </article>
+          </section>
+        )}
+
+        {activeTab === 'Telemetria in tempo reale' && (
+          <section className="rounded-2xl border border-slate-800 bg-slate-900 p-6">
+            <h2 className="mb-6 text-xl font-semibold">Live Data Stream</h2>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                ['RPM', '1820 giri/min'],
+                ['Pressione turbo', '1.12 bar'],
+                ['Temperatura olio', '94 °C'],
+                ['Lambda target', '0.99 λ'],
+                ['Anticipo accensione', '12.5°'],
+                ['Pedale acceleratore', '38%'],
+                ['Velocità veicolo', '67 km/h'],
+                ['Fuel trim STFT', '+2.1%'],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-xl border border-slate-700 bg-slate-800/70 p-4">
+                  <p className="text-xs uppercase tracking-wide text-slate-400">{label}</p>
+                  <p className="mt-1 text-lg font-semibold text-cyan-300">{value}</p>
                 </div>
               ))}
             </div>
-
-            {filteredContent.length === 0 && (
-              <div className="text-center text-gray-500 mt-4">
-                Nessun contenuto trovato
-              </div>
-            )}
-          </div>
+          </section>
         )}
 
-        {selectedVideo && (
-          <VideoPlayer
-            streamUrl={selectedVideo.url}
-            title={selectedVideo.title}
-            onClose={() => setSelectedVideo(null)}
-          />
-        )}
+        <footer className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+          Nota: usa la riprogrammazione ECU solo su veicoli autorizzati e nel rispetto delle normative locali su sicurezza, emissioni e omologazione.
+        </footer>
       </div>
     </main>
   );
